@@ -1,0 +1,15 @@
+service: chop-sls
+package:
+  artifact: handler.zip
+provider:
+  name: aws
+  runtime: python2.7
+  stage: dev
+  region: eu-west-1
+functions:
+  api:
+    handler: handler.Handle
+    events:
+      - http:
+          path: /{proxy+}
+          method: ANY
