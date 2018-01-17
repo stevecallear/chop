@@ -1,0 +1,20 @@
+service: chop-example
+provider:
+  name: aws
+  runtime: go1.x
+  stage: dev
+  region: eu-west-1
+package:
+  individually: true
+functions:
+  api:
+    package:
+      artifact: ./.package/handler.zip
+    handler: handler
+    events:
+      - http:
+          path: /
+          method: ANY
+      - http:
+          path: /{proxy+}
+          method: ANY
