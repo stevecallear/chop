@@ -6,19 +6,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/eawsy/aws-lambda-go-core/service/lambda/runtime"
-	"github.com/eawsy/aws-lambda-go-event/service/lambda/runtime/event/apigatewayproxyevt"
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 )
 
 type (
-	// Result represents a proxy integration result
-	Result struct {
-		Code    int               `json:"statusCode"`
-		Headers map[string]string `json:"headers"`
-		Body    string            `json:"body"`
-	}
-
-	// Handler represents a lambda event handler
+	// Handler represents a proxy integration event handler
 	Handler struct {
 		http.Handler
 	}
@@ -34,31 +27,33 @@ type (
 	contextKey string
 )
 
-var (
-	runtimeKey = contextKey("runtime")
-	eventKey   = contextKey("event")
-)
+var eventKey = contextKey("event")
 
-// Wrap wraps the specified HTTP handler with a lambda event handler
+// Start wraps and starts specified HTTP handler as a proxy integration event handler
+func Start(h http.Handler) {
+	lambda.Start(Wrap(h).Handle)
+}
+
+// Wrap wraps the specified HTTP handler with a proxy integration event handler
 func Wrap(h http.Handler) *Handler {
 	return &Handler{
 		Handler: h,
 	}
 }
 
-// Handle converts the lambda event into an HTTP request
-func (h *Handler) Handle(e *apigatewayproxyevt.Event, c *runtime.Context) (*Result, error) {
+// Handle dispatches the integration event as an HTTP request to the wrapped handler
+func (h *Handler) Handle(e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	r, err := NewRequest(e)
 	if err != nil {
-		return nil, err
+		return events.APIGatewayProxyResponse{}, err
 	}
 	w := NewResponseWriter()
-	h.ServeHTTP(w, withContext(withEvent(r, e), c))
+	h.ServeHTTP(w, withEvent(r, e))
 	return w.Result(), nil
 }
 
 // NewRequest parses the integration event and returns a new HTTP request
-func NewRequest(e *apigatewayproxyevt.Event) (*http.Request, error) {
+func NewRequest(e events.APIGatewayProxyRequest) (*http.Request, error) {
 	r, err := http.NewRequest(strings.ToUpper(e.HTTPMethod), e.Path, bytes.NewBuffer([]byte(e.Body)))
 	if err != nil {
 		return nil, err
@@ -103,20 +98,20 @@ func (w *ResponseWriter) WriteHeader(code int) {
 }
 
 // Result returns a proxy integration result for the response
-func (w *ResponseWriter) Result() *Result {
+func (w *ResponseWriter) Result() events.APIGatewayProxyResponse {
 	h := make(map[string]string, len(w.header))
 	for k := range w.header {
 		h[k] = w.header.Get(k)
 	}
-	r := Result{
-		Code:    w.code,
-		Headers: h,
-		Body:    w.buffer.String(),
+	r := events.APIGatewayProxyResponse{
+		StatusCode: w.code,
+		Headers:    h,
+		Body:       w.buffer.String(),
 	}
-	if r.Code == 0 {
-		r.Code = http.StatusOK
+	if r.StatusCode == 0 {
+		r.StatusCode = http.StatusOK
 	}
-	return &r
+	return r
 }
 
 func (w *ResponseWriter) writeHeader(b []byte) {
@@ -130,22 +125,12 @@ func (w *ResponseWriter) writeHeader(b []byte) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// GetEvent returns a pointer to the proxy integration event
-func GetEvent(r *http.Request) *apigatewayproxyevt.Event {
-	return r.Context().Value(eventKey).(*apigatewayproxyevt.Event)
+// GetEvent returns a copy of the proxy integration event
+func GetEvent(r *http.Request) events.APIGatewayProxyRequest {
+	return r.Context().Value(eventKey).(events.APIGatewayProxyRequest)
 }
 
-// GetContext returns the lambda runtime context
-func GetContext(r *http.Request) *runtime.Context {
-	return r.Context().Value(runtimeKey).(*runtime.Context)
-}
-
-func withEvent(r *http.Request, e *apigatewayproxyevt.Event) *http.Request {
+func withEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
 	ctx := context.WithValue(r.Context(), eventKey, e)
-	return r.WithContext(ctx)
-}
-
-func withContext(r *http.Request, c *runtime.Context) *http.Request {
-	ctx := context.WithValue(r.Context(), runtimeKey, c)
 	return r.WithContext(ctx)
 }
