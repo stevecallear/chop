@@ -3,45 +3,40 @@
 [![codecov](https://codecov.io/gh/stevecallear/chop/branch/master/graph/badge.svg)](https://codecov.io/gh/stevecallear/chop)
 [![Go Report Card](https://goreportcard.com/badge/github.com/stevecallear/chop)](https://goreportcard.com/report/github.com/stevecallear/chop)
 
-Chop provides a wrapper to use Go HTTP handlers over AWS Lambda with API Gateway proxy integration. It has been built to work with [eawsy Lambda Go shim](https://github.com/eawsy/aws-lambda-go-shim), but the contract may be tweaked if and when native Go Lambdas become available.
+Chop provides a wrapper to use Go HTTP handlers to handle AWS Lambda API Gateway proxy integration events.
 
 ## Getting started
 ```
 go get github.com/stevecallear/chop
 ```
-
 ```
 import (
     "fmt"
     "net/http"
 
-    "github.com/eawsy/aws-lambda-go-core/service/lambda/runtime"
-    "github.com/eawsy/aws-lambda-go-event/service/lambda/runtime/event/apigatewayproxyevt"
     "github.com/stevecallear/chop"
 )
 
-func Handle(evt *apigatewayproxyevt.Event, ctx *runtime.Context) (interface{}, error) {
+func main() {
     h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintf(w, "%s %s", r.Method, r.URL.String())
     })
-    return chop.Wrap(h).Handle(evt, ctx)
+    chop.Start(h)
 }
 ```
 
 ## Deploying
-* Follow the [eawsy Lambda Go shim](https://github.com/eawsy/aws-lambda-go-shim) instructions to build a handler, create a `.zip` package and deploy it to AWS Lambda
-* Create a new API Gateway API and add a 'proxy integration' resource
-* Link the resource to the Lambda and test
+Follow the 'Build and deploy' steps in [this](https://aws.amazon.com/blogs/compute/announcing-go-support-for-aws-lambda/) AWS blog post. 
 
 ## Request Context
-The proxy integration event and runtime context are stored in the request context. They can be accessed by `chop.GetEvent` and `chop.GetContext` respectively.
+The proxy integration event is stored in the request context. It can be accessed using the `chop.GetEvent` function.
 
 ```
-func Handle(evt *apigatewayproxyevt.Event, ctx *runtime.Context) (interface{}, error) {
+func main() {
     h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        c := chop.GetContext(r)
-        fmt.Fprintf(w, "%s %s", c.FunctionName, c.FunctionVersion)
+        e := chop.GetEvent(r)
+        fmt.Fprintf(w, "Stage: %s", e.RequestContext.Stage)
     })
-    return chop.Wrap(h).Handle(evt, ctx)
+    chop.Start(h)
 }
 ```
