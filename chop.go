@@ -48,7 +48,7 @@ func (h *Handler) Handle(e events.APIGatewayProxyRequest) (events.APIGatewayProx
 		return events.APIGatewayProxyResponse{}, err
 	}
 	w := NewResponseWriter()
-	h.ServeHTTP(w, withEvent(r, e))
+	h.ServeHTTP(w, WithEvent(r, e))
 	return w.Result(), nil
 }
 
@@ -130,7 +130,9 @@ func GetEvent(r *http.Request) events.APIGatewayProxyRequest {
 	return r.Context().Value(eventKey).(events.APIGatewayProxyRequest)
 }
 
-func withEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
+// WithEvent returns a copy of the request with the specified event stored in the context
+// The function is exported to simplify testing for apps that use GetEvent
+func WithEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
 	ctx := context.WithValue(r.Context(), eventKey, e)
 	return r.WithContext(ctx)
 }
