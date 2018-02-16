@@ -3,6 +3,7 @@
 *.dll
 *.so
 *.dylib
+bin
 
 # Test binary, build with `go test -c`
 *.test
@@ -18,5 +19,4 @@ debug
 .vscode/
 
 # Serverless
-.package/
 .serverless/
