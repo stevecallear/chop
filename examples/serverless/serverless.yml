@@ -5,12 +5,13 @@ provider:
   stage: dev
   region: eu-west-1
 package:
-  individually: true
+  exclude:
+    - ./**
+  include:
+    - ./bin/**
 functions:
   api:
-    package:
-      artifact: ./.package/handler.zip
-    handler: handler
+    handler: bin/handler
     events:
       - http:
           path: /
