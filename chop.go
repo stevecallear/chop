@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aws/aws-lambda-go/lambdacontext"
+
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 )
@@ -27,7 +29,10 @@ type (
 	contextKey string
 )
 
-var eventKey = contextKey("event")
+var (
+	integrationEventKey = contextKey("integrationEvent")
+	lambdaContextKey    = contextKey("lambdaContext")
+)
 
 // Start wraps and starts specified HTTP handler as a proxy integration event handler
 func Start(h http.Handler) {
@@ -42,10 +47,13 @@ func Wrap(h http.Handler) *Handler {
 }
 
 // Handle dispatches the integration event as an HTTP request to the wrapped handler
-func (h *Handler) Handle(e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) Handle(c context.Context, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	r, err := NewRequest(e)
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
+	}
+	if lc, ok := lambdacontext.FromContext(c); ok {
+		r = WithContext(r, lc)
 	}
 	w := NewResponseWriter()
 	h.ServeHTTP(w, WithEvent(r, e))
@@ -127,12 +135,24 @@ func (w *ResponseWriter) writeHeader(b []byte) {
 
 // GetEvent returns a copy of the proxy integration event
 func GetEvent(r *http.Request) events.APIGatewayProxyRequest {
-	return r.Context().Value(eventKey).(events.APIGatewayProxyRequest)
+	return r.Context().Value(integrationEventKey).(events.APIGatewayProxyRequest)
 }
 
-// WithEvent returns a copy of the request with the specified event stored in the context
+// WithEvent returns a copy of the request with the specified event stored in the request context
 // The function is exported to simplify testing for apps that use GetEvent
 func WithEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
-	ctx := context.WithValue(r.Context(), eventKey, e)
+	ctx := context.WithValue(r.Context(), integrationEventKey, e)
+	return r.WithContext(ctx)
+}
+
+// GetContext returns the lambda context
+func GetContext(r *http.Request) *lambdacontext.LambdaContext {
+	return r.Context().Value(lambdaContextKey).(*lambdacontext.LambdaContext)
+}
+
+// WithContext returns a copy of the request with the specified lambda context stored in the request context
+// The function is exported to simplify testing for apps that use GetContext
+func WithContext(r *http.Request, c *lambdacontext.LambdaContext) *http.Request {
+	ctx := context.WithValue(r.Context(), lambdaContextKey, c)
 	return r.WithContext(ctx)
 }

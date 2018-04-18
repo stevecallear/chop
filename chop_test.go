@@ -1,6 +1,7 @@
 package chop_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda/messages"
+	"github.com/aws/aws-lambda-go/lambdacontext"
+
 	"github.com/stevecallear/chop"
 )
 
@@ -104,7 +107,7 @@ func TestHandler_Handle(t *testing.T) {
 					w.Header().Add(k, r.Header.Get(k))
 				}
 			})
-			act, err := chop.Wrap(fn).Handle(tt.event)
+			act, err := chop.Wrap(fn).Handle(context.Background(), tt.event)
 			if err != nil && !tt.err {
 				t.Errorf("got %v, expected nil", err)
 			}
@@ -273,7 +276,24 @@ func TestGetEvent(t *testing.T) {
 				t.Errorf("got %v, expected %v", act, exp)
 			}
 		})
-		_, err := chop.Wrap(fn).Handle(exp)
+		_, err := chop.Wrap(fn).Handle(context.Background(), exp)
+		if err != nil {
+			t.Errorf("got %v, expected nil", err)
+		}
+	})
+}
+
+func TestGetContext(t *testing.T) {
+	t.Run("should return the lambda context", func(t *testing.T) {
+		exp := new(lambdacontext.LambdaContext)
+		ctx := lambdacontext.NewContext(context.Background(), exp)
+		fn := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			act := chop.GetContext(r)
+			if act != exp {
+				t.Errorf("got %v, expected %v", act, exp)
+			}
+		})
+		_, err := chop.Wrap(fn).Handle(ctx, events.APIGatewayProxyRequest{})
 		if err != nil {
 			t.Errorf("got %v, expected nil", err)
 		}
