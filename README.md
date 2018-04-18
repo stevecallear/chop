@@ -29,13 +29,16 @@ func main() {
 Follow the 'Build and deploy' steps in [this](https://aws.amazon.com/blogs/compute/announcing-go-support-for-aws-lambda/) AWS blog post. 
 
 ## Request Context
-The proxy integration event is stored in the request context. It can be accessed using the `chop.GetEvent` function.
+Both the proxy integration event and lambda context are stored in the request context. They can be accessed using the `chop.GetEvent` and `chop.GetContext` functions respectively.
 
 ```
 func main() {
     h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         e := chop.GetEvent(r)
         fmt.Fprintf(w, "Stage: %s", e.RequestContext.Stage)
+        
+        c := chop.GetContext(r)
+        fmt.Fprintf(w, "AwsRequestID: %s", c.AwsRequestID)
     })
     chop.Start(h)
 }
