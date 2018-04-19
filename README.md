@@ -34,10 +34,10 @@ Both the proxy integration event and lambda context are stored in the request co
 ```
 func main() {
     h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        e := chop.GetEvent(r)
+        e, _ := chop.GetEvent(r)
         fmt.Fprintf(w, "Stage: %s", e.RequestContext.Stage)
         
-        c := chop.GetContext(r)
+        c, _ := chop.GetContext(r)
         fmt.Fprintf(w, "AwsRequestID: %s", c.AwsRequestID)
     })
     chop.Start(h)
