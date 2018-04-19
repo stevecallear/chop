@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/http/httptest"
 	"net/rpc"
 	"os"
 	"reflect"
@@ -257,47 +258,101 @@ func TestResponseWriter_WriteHeader(t *testing.T) {
 }
 
 func TestGetEvent(t *testing.T) {
-	t.Run("should return the integration event", func(t *testing.T) {
-		exp := events.APIGatewayProxyRequest{
-			HTTPMethod: "GET",
-			Path:       "/resource",
-			QueryStringParameters: map[string]string{
-				"a": "1",
-				"b": "2",
+	tests := []struct {
+		name   string
+		hasEvt bool
+		evt    events.APIGatewayProxyRequest
+		ok     bool
+	}{
+		{
+			name:   "should return false if the integration event is not available",
+			hasEvt: false,
+			ok:     false,
+		},
+		{
+			name:   "should return the integration event if it is available",
+			hasEvt: true,
+			evt: events.APIGatewayProxyRequest{
+				HTTPMethod: "GET",
+				Path:       "/resource",
+				QueryStringParameters: map[string]string{
+					"a": "1",
+					"b": "2",
+				},
+				Body: "body",
+				Headers: map[string]string{
+					"X-Custom-Header": "header",
+				},
 			},
-			Body: "body",
-			Headers: map[string]string{
-				"X-Custom-Header": "header",
-			},
+			ok: true,
+		},
+	}
+	for _, tt := range tests {
+		req := httptest.NewRequest("GET", "/", nil)
+		if tt.hasEvt {
+			req = chop.WithEvent(req, tt.evt)
 		}
-		fn := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			act := chop.GetEvent(r)
-			if !reflect.DeepEqual(act, exp) {
-				t.Errorf("got %v, expected %v", act, exp)
-			}
-		})
-		_, err := chop.Wrap(fn).Handle(context.Background(), exp)
-		if err != nil {
-			t.Errorf("got %v, expected nil", err)
+		evt, ok := chop.GetEvent(req)
+		if ok != tt.ok {
+			t.Errorf("got %v, expected %v", ok, tt.ok)
 		}
-	})
+		if !reflect.DeepEqual(evt, tt.evt) {
+			t.Errorf("got %v, expected %v", evt, tt.evt)
+		}
+	}
 }
 
 func TestGetContext(t *testing.T) {
-	t.Run("should return the lambda context", func(t *testing.T) {
-		exp := new(lambdacontext.LambdaContext)
-		ctx := lambdacontext.NewContext(context.Background(), exp)
-		fn := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			act := chop.GetContext(r)
-			if act != exp {
-				t.Errorf("got %v, expected %v", act, exp)
+	tests := []struct {
+		name   string
+		hasCtx bool
+		ctx    lambdacontext.LambdaContext
+		ok     bool
+	}{
+		{
+			name:   "should return false if the context is not available",
+			hasCtx: false,
+			ok:     false,
+		},
+		{
+			name:   "should return the context if it is available",
+			hasCtx: true,
+			ctx: lambdacontext.LambdaContext{
+				AwsRequestID:       "awsRequestID",
+				InvokedFunctionArn: "invokedFunctionArn",
+				Identity: lambdacontext.CognitoIdentity{
+					CognitoIdentityID:     "cognitoIdentityID",
+					CognitoIdentityPoolID: "cognitoIdentityPoolID",
+				},
+				ClientContext: lambdacontext.ClientContext{
+					Client: lambdacontext.ClientApplication{
+						InstallationID: "installationID",
+						AppTitle:       "appTitle",
+						AppVersionCode: "appVersionCode",
+						AppPackageName: "appPackageName",
+					},
+					Env:    map[string]string{"env": "value"},
+					Custom: map[string]string{"custom": "value"},
+				},
+			},
+			ok: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			if tt.hasCtx {
+				req = req.WithContext(lambdacontext.NewContext(req.Context(), &tt.ctx))
+			}
+			ctx, ok := chop.GetContext(req)
+			if ok != tt.ok {
+				t.Errorf("got %v, expected %v", ok, tt.ok)
+			}
+			if !reflect.DeepEqual(ctx, tt.ctx) {
+				t.Errorf("got %v, expected %v", ctx, tt.ctx)
 			}
 		})
-		_, err := chop.Wrap(fn).Handle(ctx, events.APIGatewayProxyRequest{})
-		if err != nil {
-			t.Errorf("got %v, expected nil", err)
-		}
-	})
+	}
 }
 
 func invokeLocal(port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
