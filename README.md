@@ -21,6 +21,7 @@ func main() {
     h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintf(w, "%s %s", r.Method, r.URL.String())
     })
+
     chop.Start(h)
 }
 ```
@@ -40,6 +41,7 @@ func main() {
         c, _ := chop.GetContext(r)
         fmt.Fprintf(w, "AwsRequestID: %s", c.AwsRequestID)
     })
+
     chop.Start(h)
 }
 ```

@@ -11,8 +11,8 @@ import (
 	"net/rpc"
 	"os"
 	"reflect"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda/messages"
@@ -28,27 +28,26 @@ func TestStart(t *testing.T) {
 			Body:       "expected",
 			Headers:    map[string]string{},
 		}
-		wg := sync.WaitGroup{}
-		wg.Add(1)
+
 		go func() {
 			os.Setenv("_LAMBDA_SERVER_PORT", "8081")
+
 			chop.Start(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(exp.StatusCode)
 				fmt.Fprintf(w, exp.Body)
 			}))
 		}()
-		go func() {
-			req := events.APIGatewayProxyRequest{}
-			act, err := invokeLocal("8081", req)
-			if err != nil {
-				t.Errorf("got %v, expected nil", err)
-			}
-			if !reflect.DeepEqual(act, exp) {
-				t.Errorf("got %v, expected %v", act, exp)
-			}
-			wg.Done()
-		}()
-		wg.Wait()
+
+		req := events.APIGatewayProxyRequest{}
+
+		act, err := invokeLocal(t, "8081", req)
+		if err != nil {
+			t.Errorf("got %v, expected nil", err)
+		}
+
+		if !reflect.DeepEqual(act, exp) {
+			t.Errorf("got %v, expected %v", act, exp)
+		}
 	})
 }
 
@@ -94,6 +93,7 @@ func TestHandler_Handle(t *testing.T) {
 			},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,23 +101,31 @@ func TestHandler_Handle(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
+
 				w.WriteHeader(tt.code)
+
 				b, _ := ioutil.ReadAll(r.Body)
 				w.Write(b)
+
 				for k := range r.Header {
 					w.Header().Add(k, r.Header.Get(k))
 				}
 			})
+
 			act, err := chop.Wrap(fn).Handle(context.Background(), tt.event)
+
 			if err != nil && !tt.err {
 				t.Errorf("got %v, expected nil", err)
 			}
+
 			if err == nil && tt.err {
 				t.Errorf("got nil, expected an error")
 			}
+
 			if err != nil {
 				return
 			}
+
 			if !reflect.DeepEqual(act, tt.exp) {
 				t.Errorf("got %v, expected %v", act, tt.exp)
 			}
@@ -206,18 +214,23 @@ func TestResponseWriter_Write(t *testing.T) {
 			},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := chop.NewResponseWriter()
+
 			if tt.code != 0 {
 				w.WriteHeader(tt.code)
 			}
+
 			for k, v := range tt.headers {
 				w.Header().Add(k, v)
 			}
+
 			for _, d := range tt.data {
 				w.Write(d)
 			}
+
 			act := w.Result()
 			if !reflect.DeepEqual(act, tt.exp) {
 				t.Errorf("got %v, expected %v", act, tt.exp)
@@ -249,6 +262,7 @@ func TestResponseWriter_WriteHeader(t *testing.T) {
 			for _, c := range tt.codes {
 				w.WriteHeader(c)
 			}
+
 			act := w.Result().StatusCode
 			if act != tt.exp {
 				t.Errorf("got %d, expected %d", act, tt.exp)
@@ -287,15 +301,18 @@ func TestGetEvent(t *testing.T) {
 			ok: true,
 		},
 	}
+
 	for _, tt := range tests {
 		req := httptest.NewRequest("GET", "/", nil)
 		if tt.hasEvt {
 			req = chop.WithEvent(req, tt.evt)
 		}
+
 		evt, ok := chop.GetEvent(req)
 		if ok != tt.ok {
 			t.Errorf("got %v, expected %v", ok, tt.ok)
 		}
+
 		if !reflect.DeepEqual(evt, tt.evt) {
 			t.Errorf("got %v, expected %v", evt, tt.evt)
 		}
@@ -338,16 +355,19 @@ func TestGetContext(t *testing.T) {
 			ok: true,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			if tt.hasCtx {
 				req = req.WithContext(lambdacontext.NewContext(req.Context(), &tt.ctx))
 			}
+
 			ctx, ok := chop.GetContext(req)
 			if ok != tt.ok {
 				t.Errorf("got %v, expected %v", ok, tt.ok)
 			}
+
 			if !reflect.DeepEqual(ctx, tt.ctx) {
 				t.Errorf("got %v, expected %v", ctx, tt.ctx)
 			}
@@ -355,26 +375,60 @@ func TestGetContext(t *testing.T) {
 	}
 }
 
-func invokeLocal(port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	client, err := rpc.Dial("tcp", fmt.Sprintf("localhost:%s", port))
+func invokeLocal(t *testing.T, port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	dialWithRetries := func(attempts int, delay time.Duration) (*rpc.Client, error) {
+		addr := fmt.Sprintf("localhost:%s", port)
+
+		var (
+			attempt int
+			client  *rpc.Client
+			err     error
+		)
+		for attempt < attempts {
+			client, err = rpc.Dial("tcp", addr)
+
+			if err != nil {
+				if attempt == attempts-1 {
+					return nil, err
+				}
+
+				t.Logf("got: '%v', retrying", err)
+				time.Sleep(delay)
+			} else {
+				return client, nil
+			}
+
+			attempt++
+		}
+
+		return nil, err
+	}
+
+	client, err := dialWithRetries(3, 10*time.Millisecond)
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
 	defer client.Close()
+
 	payload, err := json.Marshal(&e)
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
+
 	invReq := messages.InvokeRequest{Payload: payload}
 	invRes := messages.InvokeResponse{}
+
 	err = client.Call("Function.Invoke", &invReq, &invRes)
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
+
 	if invRes.Error != nil {
 		return events.APIGatewayProxyResponse{}, errors.New(invRes.Error.Message)
 	}
+
 	res := events.APIGatewayProxyResponse{}
+
 	err = json.Unmarshal(invRes.Payload, &res)
 	return res, err
 }
