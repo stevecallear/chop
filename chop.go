@@ -48,8 +48,10 @@ func (h *Handler) Handle(c context.Context, e events.APIGatewayProxyRequest) (ev
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
+
 	w := NewResponseWriter()
 	h.ServeHTTP(w, WithEvent(r, e))
+
 	return w.Result(), nil
 }
 
@@ -59,14 +61,18 @@ func NewRequest(c context.Context, e events.APIGatewayProxyRequest) (*http.Reque
 	if err != nil {
 		return nil, err
 	}
+
 	q := r.URL.Query()
 	for k, v := range e.QueryStringParameters {
 		q.Add(k, v)
 	}
+
 	r.URL.RawQuery = q.Encode()
+
 	for k, v := range e.Headers {
 		r.Header.Add(k, v)
 	}
+
 	return r.WithContext(c), nil
 }
 
@@ -86,6 +92,7 @@ func (w *ResponseWriter) Header() http.Header {
 func (w *ResponseWriter) Write(b []byte) (int, error) {
 	w.writeHeader(b)
 	w.buffer.Write(b)
+
 	return len(b), nil
 }
 
@@ -94,6 +101,7 @@ func (w *ResponseWriter) WriteHeader(code int) {
 	if w.wroteHeader {
 		return
 	}
+
 	w.code = code
 	w.wroteHeader = true
 }
@@ -104,6 +112,7 @@ func (w *ResponseWriter) Result() events.APIGatewayProxyResponse {
 	for k := range w.header {
 		h[k] = w.header.Get(k)
 	}
+
 	r := events.APIGatewayProxyResponse{
 		StatusCode: w.code,
 		Headers:    h,
@@ -112,6 +121,7 @@ func (w *ResponseWriter) Result() events.APIGatewayProxyResponse {
 	if r.StatusCode == 0 {
 		r.StatusCode = http.StatusOK
 	}
+
 	return r
 }
 
@@ -119,16 +129,19 @@ func (w *ResponseWriter) writeHeader(b []byte) {
 	if w.wroteHeader {
 		return
 	}
+
 	m := w.Header()
 	if _, ct := m["Content-Type"]; !ct && m.Get("Transfer-Encoding") == "" {
 		m.Set("Content-Type", http.DetectContentType(b))
 	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
 // GetEvent returns a copy of the proxy integration event if it exists
 func GetEvent(r *http.Request) (events.APIGatewayProxyRequest, bool) {
 	e, ok := r.Context().Value(eventContextKey).(events.APIGatewayProxyRequest)
+
 	return e, ok
 }
 
@@ -137,6 +150,7 @@ func GetContext(r *http.Request) (lambdacontext.LambdaContext, bool) {
 	if c, ok := lambdacontext.FromContext(r.Context()); ok {
 		return *c, true
 	}
+
 	return lambdacontext.LambdaContext{}, false
 }
 
@@ -144,5 +158,6 @@ func GetContext(r *http.Request) (lambdacontext.LambdaContext, bool) {
 // The function is exported to simplify testing for apps that use GetEvent
 func WithEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
 	ctx := context.WithValue(r.Context(), eventContextKey, e)
+
 	return r.WithContext(ctx)
 }
