@@ -11,8 +11,8 @@ import (
 	"net/rpc"
 	"os"
 	"reflect"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda/messages"
@@ -29,9 +29,6 @@ func TestStart(t *testing.T) {
 			Headers:    map[string]string{},
 		}
 
-		wg := sync.WaitGroup{}
-		wg.Add(1)
-
 		go func() {
 			os.Setenv("_LAMBDA_SERVER_PORT", "8081")
 
@@ -41,22 +38,16 @@ func TestStart(t *testing.T) {
 			}))
 		}()
 
-		go func() {
-			req := events.APIGatewayProxyRequest{}
+		req := events.APIGatewayProxyRequest{}
 
-			act, err := invokeLocal("8081", req)
-			if err != nil {
-				t.Errorf("got %v, expected nil", err)
-			}
+		act, err := invokeLocal(t, "8081", req)
+		if err != nil {
+			t.Errorf("got %v, expected nil", err)
+		}
 
-			if !reflect.DeepEqual(act, exp) {
-				t.Errorf("got %v, expected %v", act, exp)
-			}
-
-			wg.Done()
-		}()
-
-		wg.Wait()
+		if !reflect.DeepEqual(act, exp) {
+			t.Errorf("got %v, expected %v", act, exp)
+		}
 	})
 }
 
@@ -384,8 +375,36 @@ func TestGetContext(t *testing.T) {
 	}
 }
 
-func invokeLocal(port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	client, err := rpc.Dial("tcp", fmt.Sprintf("localhost:%s", port))
+func invokeLocal(t *testing.T, port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	dialWithRetries := func(attempts int, delay time.Duration) (*rpc.Client, error) {
+		addr := fmt.Sprintf("localhost:%s", port)
+
+		var (
+			attempt int
+			client  *rpc.Client
+			err     error
+		)
+		for attempt < attempts {
+			client, err = rpc.Dial("tcp", addr)
+
+			if err != nil {
+				if attempt == attempts-1 {
+					return nil, err
+				}
+
+				t.Logf("got: '%v', retrying", err)
+				time.Sleep(delay)
+			} else {
+				return client, nil
+			}
+
+			attempt++
+		}
+
+		return nil, err
+	}
+
+	client, err := dialWithRetries(3, 10*time.Millisecond)
 	if err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
