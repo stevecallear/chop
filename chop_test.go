@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda/messages"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
-	"github.com/stevecallear/chop"
+	"github.com/stevecallear/chop/v2"
 )
 
 func TestStart(t *testing.T) {
