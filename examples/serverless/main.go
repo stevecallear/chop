@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/stevecallear/chop"
+	"github.com/stevecallear/chop/v2"
 )
 
 func main() {

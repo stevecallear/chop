@@ -3,88 +3,168 @@ package chop
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-lambda-go/lambdacontext"
+	"github.com/tidwall/gjson"
 )
 
 type (
-	// Handler represents a proxy integration event handler
+	// Handler represents a lambda event handler
 	Handler struct {
 		http.Handler
 	}
 
-	// ResponseWriter represents a proxy integration response writer
+	// ResponseWriter represents a lambda event response writer
 	ResponseWriter struct {
 		code        int
-		header      http.Header
 		buffer      *bytes.Buffer
+		header      http.Header
 		wroteHeader bool
 	}
 
-	contextKey string
+	eventProcessor struct {
+		canProcess       func(map[string]gjson.Result) bool
+		unmarshalRequest func(context.Context, []byte) (*http.Request, error)
+		marshalResponse  func(*ResponseWriter) ([]byte, error)
+	}
+
+	eventContextKey struct{}
 )
 
-var eventContextKey = contextKey("eventContextKey")
+var (
+	// ErrUnsupportedEventType indicates that the received lambda event is not supported
+	ErrUnsupportedEventType = errors.New("unsupported lambda event type")
 
-// Start wraps and starts specified HTTP handler as a proxy integration event handler
+	apiGatewayProxyEventProcessor = &eventProcessor{
+		canProcess: func(requestContext map[string]gjson.Result) bool {
+			_, ok := requestContext["apiId"]
+			return ok
+		},
+		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
+			e := new(events.APIGatewayProxyRequest)
+			if err := json.Unmarshal(payload, e); err != nil {
+				return nil, err
+			}
+
+			r, err := http.NewRequest(e.HTTPMethod, e.Path, bytes.NewBufferString(e.Body))
+			if err != nil {
+				return nil, err
+			}
+
+			q := r.URL.Query()
+			addMapValues(e.QueryStringParameters, e.MultiValueQueryStringParameters, q.Add)
+			r.URL.RawQuery = q.Encode()
+
+			addMapValues(e.Headers, e.MultiValueHeaders, r.Header.Add)
+
+			return WithEvent(r.WithContext(ctx), e), nil
+		},
+		marshalResponse: func(w *ResponseWriter) ([]byte, error) {
+			return json.Marshal(&events.APIGatewayProxyResponse{
+				StatusCode:        w.StatusCode(),
+				Headers:           reduceHeaders(w.Header()),
+				MultiValueHeaders: w.Header(),
+				Body:              w.buffer.String(),
+			})
+		},
+	}
+
+	albTargetGroupEventProcessor = &eventProcessor{
+		canProcess: func(requestContext map[string]gjson.Result) bool {
+			_, ok := requestContext["elb"]
+			return ok
+		},
+		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
+			e := new(events.ALBTargetGroupRequest)
+			if err := json.Unmarshal(payload, e); err != nil {
+				return nil, err
+			}
+
+			r, err := http.NewRequest(e.HTTPMethod, e.Path, bytes.NewBufferString(e.Body))
+			if err != nil {
+				return nil, err
+			}
+
+			q := r.URL.Query()
+			addMapValues(e.QueryStringParameters, e.MultiValueQueryStringParameters, q.Add)
+			r.URL.RawQuery = q.Encode()
+
+			addMapValues(e.Headers, e.MultiValueHeaders, r.Header.Add)
+
+			return WithEvent(r.WithContext(ctx), e), nil
+		},
+		marshalResponse: func(w *ResponseWriter) ([]byte, error) {
+			return json.Marshal(&events.ALBTargetGroupResponse{
+				StatusCode:        w.StatusCode(),
+				StatusDescription: w.Status(),
+				Headers:           reduceHeaders(w.Header()),
+				MultiValueHeaders: w.Header(),
+				Body:              w.buffer.String(),
+			})
+		},
+	}
+)
+
+// Start wraps and starts the specified HTTP handler as a lambda function handler
 func Start(h http.Handler) {
-	lambda.Start(Wrap(h).Handle)
+	lambda.StartHandler(Wrap(h))
 }
 
-// Wrap wraps the specified HTTP handler with a proxy integration event handler
+// Wrap wraps the specified HTTP handler as a lambda function handler
 func Wrap(h http.Handler) *Handler {
 	return &Handler{
 		Handler: h,
 	}
 }
 
-// Handle dispatches the integration event as an HTTP request to the wrapped handler
-func (h *Handler) Handle(c context.Context, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	r, err := NewRequest(c, e)
-	if err != nil {
-		return events.APIGatewayProxyResponse{}, err
-	}
-
-	w := NewResponseWriter()
-	h.ServeHTTP(w, WithEvent(r, e))
-
-	return w.Result(), nil
-}
-
-// NewRequest parses the integration event and returns a new HTTP request
-func NewRequest(c context.Context, e events.APIGatewayProxyRequest) (*http.Request, error) {
-	r, err := http.NewRequest(strings.ToUpper(e.HTTPMethod), e.Path, bytes.NewBuffer([]byte(e.Body)))
+// Invoke invokes the lambda function handler
+func (h *Handler) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
+	p, err := getEventProcessor(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	q := r.URL.Query()
-	for k, v := range e.QueryStringParameters {
-		q.Add(k, v)
+	r, err := p.unmarshalRequest(ctx, payload)
+	if err != nil {
+		return nil, err
 	}
 
-	r.URL.RawQuery = q.Encode()
+	w := NewResponseWriter()
+	h.ServeHTTP(w, r)
 
-	for k, v := range e.Headers {
-		r.Header.Add(k, v)
-	}
-
-	return r.WithContext(c), nil
+	return p.marshalResponse(w)
 }
 
 // NewResponseWriter returns a new ResponseWriter
 func NewResponseWriter() *ResponseWriter {
 	return &ResponseWriter{
-		header: make(http.Header),
+		code:   200,
 		buffer: new(bytes.Buffer),
+		header: http.Header{},
 	}
 }
 
-// Header returns the HTTP headers
+// Status returns the HTTP status as a string
+func (w *ResponseWriter) Status() string {
+	return fmt.Sprintf("%d %s", w.code, http.StatusText(w.code))
+}
+
+// StatusCode returns the HTTP status code
+func (w *ResponseWriter) StatusCode() int {
+	return w.code
+}
+
+// Body returns the response body as a string
+func (w *ResponseWriter) Body() string {
+	return w.buffer.String()
+}
+
+// Header returns the response headers
 func (w *ResponseWriter) Header() http.Header {
 	return w.header
 }
@@ -106,25 +186,6 @@ func (w *ResponseWriter) WriteHeader(code int) {
 	w.wroteHeader = true
 }
 
-// Result returns a proxy integration result for the response
-func (w *ResponseWriter) Result() events.APIGatewayProxyResponse {
-	h := make(map[string]string, len(w.header))
-	for k := range w.header {
-		h[k] = w.header.Get(k)
-	}
-
-	r := events.APIGatewayProxyResponse{
-		StatusCode: w.code,
-		Headers:    h,
-		Body:       w.buffer.String(),
-	}
-	if r.StatusCode == 0 {
-		r.StatusCode = http.StatusOK
-	}
-
-	return r
-}
-
 func (w *ResponseWriter) writeHeader(b []byte) {
 	if w.wroteHeader {
 		return
@@ -138,26 +199,53 @@ func (w *ResponseWriter) writeHeader(b []byte) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// GetEvent returns a copy of the proxy integration event if it exists
-func GetEvent(r *http.Request) (events.APIGatewayProxyRequest, bool) {
-	e, ok := r.Context().Value(eventContextKey).(events.APIGatewayProxyRequest)
-
-	return e, ok
-}
-
-// GetContext returns a copy of the lambda context if it exists
-func GetContext(r *http.Request) (lambdacontext.LambdaContext, bool) {
-	if c, ok := lambdacontext.FromContext(r.Context()); ok {
-		return *c, true
-	}
-
-	return lambdacontext.LambdaContext{}, false
-}
-
 // WithEvent returns a copy of the request with the specified event stored in the request context
-// The function is exported to simplify testing for apps that use GetEvent
-func WithEvent(r *http.Request, e events.APIGatewayProxyRequest) *http.Request {
-	ctx := context.WithValue(r.Context(), eventContextKey, e)
+func WithEvent(r *http.Request, event interface{}) *http.Request {
+	ctx := context.WithValue(r.Context(), eventContextKey{}, event)
 
 	return r.WithContext(ctx)
+}
+
+// GetEvent returns the lambda event stored within the specified request context if it exists
+func GetEvent(r *http.Request) interface{} {
+	return r.Context().Value(eventContextKey{})
+}
+
+func getEventProcessor(payload []byte) (*eventProcessor, error) {
+	ctx := gjson.GetBytes(payload, "requestContext").Map()
+
+	for _, p := range []*eventProcessor{apiGatewayProxyEventProcessor, albTargetGroupEventProcessor} {
+		if p.canProcess(ctx) {
+			return p, nil
+		}
+	}
+
+	return nil, ErrUnsupportedEventType
+}
+
+func addMapValues(values map[string]string, multiValues map[string][]string, addFn func(string, string)) {
+	if multiValues != nil && len(multiValues) > 1 {
+		for k, mv := range multiValues {
+			for _, v := range mv {
+				addFn(k, v)
+			}
+		}
+
+		return
+	}
+
+	if values != nil {
+		for k, v := range values {
+			addFn(k, v)
+		}
+	}
+}
+
+func reduceHeaders(h http.Header) map[string]string {
+	m := make(map[string]string, len(h))
+	for k := range h {
+		m[k] = h.Get(k)
+	}
+
+	return m
 }

@@ -1,13 +1,12 @@
 package chop_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
 	"net/rpc"
 	"os"
 	"reflect"
@@ -18,116 +17,275 @@ import (
 	"github.com/aws/aws-lambda-go/lambda/messages"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
-	"github.com/stevecallear/chop"
+	"github.com/stevecallear/chop/v2"
 )
 
 func TestStart(t *testing.T) {
-	t.Run("should start the lambda", func(t *testing.T) {
-		exp := events.APIGatewayProxyResponse{
-			StatusCode: http.StatusCreated,
-			Body:       "expected",
-			Headers:    map[string]string{},
-		}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := lambdacontext.FromContext(r.Context())
+		e := chop.GetEvent(r)
 
-		go func() {
-			os.Setenv("_LAMBDA_SERVER_PORT", "8081")
-
-			chop.Start(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(exp.StatusCode)
-				fmt.Fprintf(w, exp.Body)
-			}))
-		}()
-
-		req := events.APIGatewayProxyRequest{}
-
-		act, err := invokeLocal(t, "8081", req)
-		if err != nil {
-			t.Errorf("got %v, expected nil", err)
-		}
-
-		if !reflect.DeepEqual(act, exp) {
-			t.Errorf("got %v, expected %v", act, exp)
-		}
+		w.Write([]byte(fmt.Sprintf("%T|%T", c, e)))
 	})
-}
 
-func TestHandler_Handle(t *testing.T) {
 	tests := []struct {
-		name  string
-		event events.APIGatewayProxyRequest
-		path  string
-		code  int
-		err   bool
-		exp   events.APIGatewayProxyResponse
+		name    string
+		payload string
+		act     interface{}
+		exp     interface{}
 	}{
 		{
-			name: "should return an error if the path is invalid",
-			event: events.APIGatewayProxyRequest{
-				HTTPMethod: "GET",
-				Path:       "/resource###%",
+			name:    "should handle api gateway proxy events",
+			payload: apiGatewayProxyEventPayload,
+			act:     new(events.APIGatewayProxyResponse),
+			exp: &events.APIGatewayProxyResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]string{
+					"Content-Type": "text/plain; charset=utf-8",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type": {"text/plain; charset=utf-8"},
+				},
+				Body: "*lambdacontext.LambdaContext|*events.APIGatewayProxyRequest",
+			},
+		},
+		{
+			name:    "should handle alb target group events",
+			payload: albTargetGroupSingleValueEventPayload,
+			act:     new(events.ALBTargetGroupResponse),
+			exp: &events.ALBTargetGroupResponse{
+				StatusCode:        http.StatusOK,
+				StatusDescription: toStatusDescription(http.StatusOK),
+				Headers: map[string]string{
+					"Content-Type": "text/plain; charset=utf-8",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type": {"text/plain; charset=utf-8"},
+				},
+				Body: "*lambdacontext.LambdaContext|*events.ALBTargetGroupRequest",
+			},
+		},
+	}
+
+	go func() {
+		os.Setenv("_LAMBDA_SERVER_PORT", "8081")
+		chop.Start(handler)
+	}()
+
+	time.Sleep(100 * time.Millisecond) // allow the handler to start
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(*testing.T) {
+			b, err := invokeLocal("8081", []byte(tt.payload))
+			if err != nil {
+				t.Errorf("got %v, expected nil", err)
+				t.FailNow()
+			}
+
+			if err = json.Unmarshal(b, tt.act); err != nil {
+				t.Errorf("got %v, expected nil", err)
+			}
+
+			if !reflect.DeepEqual(tt.act, tt.exp) {
+				t.Errorf("got %v, expected %v", tt.act, tt.exp)
+			}
+		})
+	}
+}
+
+func TestHandler_Invoke(t *testing.T) {
+	tests := []struct {
+		name      string
+		handlerFn func(*testing.T) http.HandlerFunc
+		payload   string
+		err       bool
+		act       interface{}
+		exp       interface{}
+	}{
+		{
+			name:    "should return an error if the event is invalid",
+			payload: `{}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
 			},
 			err: true,
 		},
 		{
-			name: "should handle the event",
-			event: events.APIGatewayProxyRequest{
-				HTTPMethod: "GET",
-				Path:       "/resource",
-				QueryStringParameters: map[string]string{
-					"a": "1",
-					"b": "2",
+			name:    "should return an error if the api gateway proxy event cannot be unmarshalled",
+			payload: `{"requestContext":{"apiId":"id"},"resource":"a}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should return an error if the api gateway proxy event path is invalid",
+			payload: `{"httpMethod":"GET","path":"/resource###%","requestContext":{"apiId":"id"}}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should handle api gateway proxy events",
+			payload: apiGatewayProxyEventPayload,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					exp := request{
+						method: "GET",
+						url:    "/resource/?q1=v1&q2=v2&q2=v3",
+						body:   "body",
+						header: http.Header{
+							"X-Custom-Header1": {"v1"},
+							"X-Custom-Header2": {"v2", "v3"},
+						},
+					}
+
+					act := toRequest(r)
+
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("got %v, expected %v", act, exp)
+					}
+
+					w.Header().Add("X-Custom-Header", "v1")
+					w.Header().Add("X-Custom-Header", "v2")
+					w.Write([]byte("body"))
+				}
+			},
+			act: &events.APIGatewayProxyResponse{},
+			exp: &events.APIGatewayProxyResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]string{
+					"Content-Type":    "text/plain; charset=utf-8",
+					"X-Custom-Header": "v1",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type":    {"text/plain; charset=utf-8"},
+					"X-Custom-Header": {"v1", "v2"},
 				},
 				Body: "body",
-				Headers: map[string]string{
-					"X-Custom-Header": "header",
-				},
 			},
-			path: "/resource?a=1&b=2",
-			code: http.StatusCreated,
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusCreated,
-				Body:       "body",
+		},
+		{
+			name:    "should return an error if the alb target group event cannot be unmarshalled",
+			payload: `{"requestContext":{"elb":{}},"resource":"a}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should return an error if the alb target group event path is invalid",
+			payload: `{"httpMethod":"GET","path":"/resource###%","requestContext":{"elb":{}}}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should handle alb target group single value events",
+			payload: albTargetGroupSingleValueEventPayload,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					exp := request{
+						method: "GET",
+						url:    "/resource/?q1=v1&q2=v2",
+						body:   "body",
+						header: http.Header{
+							"X-Custom-Header1": {"v1"},
+							"X-Custom-Header2": {"v2"},
+						},
+					}
+
+					act := toRequest(r)
+
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("got %v, expected %v", act, exp)
+					}
+
+					w.Header().Add("X-Custom-Header", "v1")
+					w.Header().Add("X-Custom-Header", "v2")
+					w.Write([]byte("body"))
+				}
+			},
+			act: &events.ALBTargetGroupResponse{},
+			exp: &events.ALBTargetGroupResponse{
+				StatusCode:        http.StatusOK,
+				StatusDescription: toStatusDescription(http.StatusOK),
 				Headers: map[string]string{
-					"X-Custom-Header": "header",
+					"Content-Type":    "text/plain; charset=utf-8",
+					"X-Custom-Header": "v1",
 				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type":    {"text/plain; charset=utf-8"},
+					"X-Custom-Header": {"v1", "v2"},
+				},
+				Body: "body",
+			},
+		},
+		{
+			name:    "should handle alb target group multi value events",
+			payload: albTargetGroupMultiValueEventPayload,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					exp := request{
+						method: "GET",
+						url:    "/resource/?q1=v1&q2=v2&q2=v3",
+						body:   "body",
+						header: http.Header{
+							"X-Custom-Header1": {"v1"},
+							"X-Custom-Header2": {"v2", "v3"},
+						},
+					}
+
+					act := toRequest(r)
+
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("got %v, expected %v", act, exp)
+					}
+
+					w.Header().Add("X-Custom-Header", "v1")
+					w.Header().Add("X-Custom-Header", "v2")
+					w.Write([]byte("body"))
+				}
+			},
+			act: &events.ALBTargetGroupResponse{},
+			exp: &events.ALBTargetGroupResponse{
+				StatusCode:        http.StatusOK,
+				StatusDescription: toStatusDescription(http.StatusOK),
+				Headers: map[string]string{
+					"Content-Type":    "text/plain; charset=utf-8",
+					"X-Custom-Header": "v1",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type":    {"text/plain; charset=utf-8"},
+					"X-Custom-Header": {"v1", "v2"},
+				},
+				Body: "body",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.String() != tt.path {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-
-				w.WriteHeader(tt.code)
-
-				b, _ := ioutil.ReadAll(r.Body)
-				w.Write(b)
-
-				for k := range r.Header {
-					w.Header().Add(k, r.Header.Get(k))
-				}
-			})
-
-			act, err := chop.Wrap(fn).Handle(context.Background(), tt.event)
+			h := tt.handlerFn(t)
+			b, err := chop.Wrap(h).Invoke(context.Background(), []byte(tt.payload))
 
 			if err != nil && !tt.err {
 				t.Errorf("got %v, expected nil", err)
+			} else if err == nil && tt.err {
+				t.Error("got nil, expected an error")
 			}
-
-			if err == nil && tt.err {
-				t.Errorf("got nil, expected an error")
-			}
-
 			if err != nil {
 				return
 			}
 
-			if !reflect.DeepEqual(act, tt.exp) {
-				t.Errorf("got %v, expected %v", act, tt.exp)
+			if err = json.Unmarshal(b, tt.act); err != nil {
+				t.Errorf("got %v, expected nil", err)
+			}
+
+			if !reflect.DeepEqual(tt.act, tt.exp) {
+				t.Errorf("got %v, expected %v", tt.act, tt.exp)
 			}
 		})
 	}
@@ -135,82 +293,97 @@ func TestHandler_Handle(t *testing.T) {
 
 func TestResponseWriter_Write(t *testing.T) {
 	tests := []struct {
-		name    string
-		code    int
-		data    [][]byte
-		headers map[string]string
-		exp     events.APIGatewayProxyResponse
+		name   string
+		code   int
+		data   []string
+		header http.Header
+		exp    response
 	}{
 		{
-			name:    "should set default status code if not called",
-			data:    [][]byte{},
-			headers: make(map[string]string),
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusOK,
-				Headers:    make(map[string]string),
+			name: "should set default status code if not called",
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				header:     http.Header{},
 			},
 		},
 		{
-			name:    "should set default status code and headers",
-			data:    [][]byte{[]byte("body")},
-			headers: make(map[string]string),
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusOK,
-				Headers: map[string]string{
-					"Content-Type": "text/plain; charset=utf-8",
+			name: "should set default status code and headers",
+			data: []string{"body"},
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				body:       "body",
+				header: http.Header{
+					"Content-Type": {"text/plain; charset=utf-8"},
 				},
-				Body: "body",
 			},
 		},
 		{
-			name:    "should not overwrite existing status code",
-			code:    http.StatusCreated,
-			data:    [][]byte{[]byte("body")},
-			headers: make(map[string]string),
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusCreated,
-				Headers:    make(map[string]string),
-				Body:       "body",
+			name: "should not overwrite existing status code",
+			code: http.StatusCreated,
+			data: []string{"body"},
+			exp: response{
+				status:     toStatusDescription(http.StatusCreated),
+				statusCode: http.StatusCreated,
+				body:       "body",
+				header:     http.Header{},
 			},
 		},
 		{
 			name: "should not overwrite existing content type header",
-			data: [][]byte{[]byte("body")},
-			headers: map[string]string{
-				"Content-Type": "application/json",
+			data: []string{"body"},
+			header: http.Header{
+				"Content-Type": {"application/json"},
 			},
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusOK,
-				Headers: map[string]string{
-					"Content-Type": "application/json",
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				body:       "body",
+				header: http.Header{
+					"Content-Type": {"application/json"},
 				},
-				Body: "body",
 			},
 		},
 		{
 			name: "should not write content type header if transfer encoding is set",
-			data: [][]byte{[]byte("body")},
-			headers: map[string]string{
-				"Transfer-Encoding": "gzip",
+			data: []string{"body"},
+			header: http.Header{
+				"Transfer-Encoding": {"gzip"},
 			},
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusOK,
-				Headers: map[string]string{
-					"Transfer-Encoding": "gzip",
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				body:       "body",
+				header: http.Header{
+					"Transfer-Encoding": {"gzip"},
 				},
-				Body: "body",
 			},
 		},
 		{
-			name:    "should permit multiple writes",
-			data:    [][]byte{[]byte("a"), []byte("b"), []byte("c")},
-			headers: make(map[string]string),
-			exp: events.APIGatewayProxyResponse{
-				StatusCode: http.StatusOK,
-				Headers: map[string]string{
-					"Content-Type": "text/plain; charset=utf-8",
+			name:   "should permit multiple writes",
+			data:   []string{"a", "b", "c"},
+			header: http.Header{},
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				body:       "abc",
+				header: http.Header{
+					"Content-Type": {"text/plain; charset=utf-8"},
 				},
-				Body: "abc",
+			},
+		},
+		{
+			name: "should support multi value headers",
+			header: http.Header{
+				"X-Custom-Header": {"value1", "value2"},
+			},
+			exp: response{
+				status:     toStatusDescription(http.StatusOK),
+				statusCode: http.StatusOK,
+				header: http.Header{
+					"X-Custom-Header": {"value1", "value2"},
+				},
 			},
 		},
 	}
@@ -223,15 +396,22 @@ func TestResponseWriter_Write(t *testing.T) {
 				w.WriteHeader(tt.code)
 			}
 
-			for k, v := range tt.headers {
-				w.Header().Add(k, v)
+			if tt.header != nil {
+				for k, vs := range tt.header {
+					for _, v := range vs {
+						w.Header().Add(k, v)
+					}
+				}
 			}
 
-			for _, d := range tt.data {
-				w.Write(d)
+			if tt.data != nil {
+				for _, d := range tt.data {
+					w.Write([]byte(d))
+				}
 			}
 
-			act := w.Result()
+			act := toResponse(w)
+
 			if !reflect.DeepEqual(act, tt.exp) {
 				t.Errorf("got %v, expected %v", act, tt.exp)
 			}
@@ -243,192 +423,208 @@ func TestResponseWriter_WriteHeader(t *testing.T) {
 	tests := []struct {
 		name  string
 		codes []int
-		exp   int
+		exp   response
 	}{
 		{
-			name:  "should use the value",
+			name:  "should use the specified value",
 			codes: []int{http.StatusBadRequest},
-			exp:   http.StatusBadRequest,
+			exp: response{
+				status:     toStatusDescription(http.StatusBadRequest),
+				statusCode: http.StatusBadRequest,
+				header:     http.Header{},
+			},
 		},
 		{
 			name:  "should use the first value",
 			codes: []int{http.StatusBadRequest, http.StatusOK},
-			exp:   http.StatusBadRequest,
+			exp: response{
+				status:     toStatusDescription(http.StatusBadRequest),
+				statusCode: http.StatusBadRequest,
+				header:     http.Header{},
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := chop.NewResponseWriter()
+
 			for _, c := range tt.codes {
 				w.WriteHeader(c)
 			}
 
-			act := w.Result().StatusCode
-			if act != tt.exp {
-				t.Errorf("got %d, expected %d", act, tt.exp)
+			act := toResponse(w)
+
+			if !reflect.DeepEqual(act, tt.exp) {
+				t.Errorf("got %v, expected %v", act, tt.exp)
 			}
 		})
 	}
 }
 
-func TestGetEvent(t *testing.T) {
-	tests := []struct {
-		name   string
-		hasEvt bool
-		evt    events.APIGatewayProxyRequest
-		ok     bool
-	}{
-		{
-			name:   "should return false if the integration event is not available",
-			hasEvt: false,
-			ok:     false,
-		},
-		{
-			name:   "should return the integration event if it is available",
-			hasEvt: true,
-			evt: events.APIGatewayProxyRequest{
-				HTTPMethod: "GET",
-				Path:       "/resource",
-				QueryStringParameters: map[string]string{
-					"a": "1",
-					"b": "2",
-				},
-				Body: "body",
-				Headers: map[string]string{
-					"X-Custom-Header": "header",
-				},
-			},
-			ok: true,
-		},
+type (
+	request struct {
+		method string
+		url    string
+		body   string
+		header http.Header
 	}
 
-	for _, tt := range tests {
-		req := httptest.NewRequest("GET", "/", nil)
-		if tt.hasEvt {
-			req = chop.WithEvent(req, tt.evt)
-		}
+	response struct {
+		status     string
+		statusCode int
+		body       string
+		header     http.Header
+	}
+)
 
-		evt, ok := chop.GetEvent(req)
-		if ok != tt.ok {
-			t.Errorf("got %v, expected %v", ok, tt.ok)
-		}
+func toRequest(r *http.Request) request {
+	if r == nil {
+		return request{}
+	}
 
-		if !reflect.DeepEqual(evt, tt.evt) {
-			t.Errorf("got %v, expected %v", evt, tt.evt)
-		}
+	b := bytes.NewBuffer(nil)
+	b.ReadFrom(r.Body)
+
+	return request{
+		method: r.Method,
+		url:    r.URL.String(),
+		body:   b.String(),
+		header: r.Header,
 	}
 }
 
-func TestGetContext(t *testing.T) {
-	tests := []struct {
-		name   string
-		hasCtx bool
-		ctx    lambdacontext.LambdaContext
-		ok     bool
-	}{
-		{
-			name:   "should return false if the context is not available",
-			hasCtx: false,
-			ok:     false,
-		},
-		{
-			name:   "should return the context if it is available",
-			hasCtx: true,
-			ctx: lambdacontext.LambdaContext{
-				AwsRequestID:       "awsRequestID",
-				InvokedFunctionArn: "invokedFunctionArn",
-				Identity: lambdacontext.CognitoIdentity{
-					CognitoIdentityID:     "cognitoIdentityID",
-					CognitoIdentityPoolID: "cognitoIdentityPoolID",
-				},
-				ClientContext: lambdacontext.ClientContext{
-					Client: lambdacontext.ClientApplication{
-						InstallationID: "installationID",
-						AppTitle:       "appTitle",
-						AppVersionCode: "appVersionCode",
-						AppPackageName: "appPackageName",
-					},
-					Env:    map[string]string{"env": "value"},
-					Custom: map[string]string{"custom": "value"},
-				},
-			},
-			ok: true,
-		},
+func toResponse(w *chop.ResponseWriter) response {
+	if w == nil {
+		return response{}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/", nil)
-			if tt.hasCtx {
-				req = req.WithContext(lambdacontext.NewContext(req.Context(), &tt.ctx))
-			}
-
-			ctx, ok := chop.GetContext(req)
-			if ok != tt.ok {
-				t.Errorf("got %v, expected %v", ok, tt.ok)
-			}
-
-			if !reflect.DeepEqual(ctx, tt.ctx) {
-				t.Errorf("got %v, expected %v", ctx, tt.ctx)
-			}
-		})
+	return response{
+		status:     w.Status(),
+		statusCode: w.StatusCode(),
+		body:       w.Body(),
+		header:     w.Header(),
 	}
 }
 
-func invokeLocal(t *testing.T, port string, e events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	dialWithRetries := func(attempts int, delay time.Duration) (*rpc.Client, error) {
-		addr := fmt.Sprintf("localhost:%s", port)
+func toStatusDescription(code int) string {
+	return fmt.Sprintf("%d %s", code, http.StatusText(code))
+}
 
-		var (
-			attempt int
-			client  *rpc.Client
-			err     error
-		)
-		for attempt < attempts {
-			client, err = rpc.Dial("tcp", addr)
-
-			if err != nil {
-				if attempt == attempts-1 {
-					return nil, err
-				}
-
-				t.Logf("got: '%v', retrying", err)
-				time.Sleep(delay)
-			} else {
-				return client, nil
-			}
-
-			attempt++
-		}
-
-		return nil, err
-	}
-
-	client, err := dialWithRetries(3, 10*time.Millisecond)
+func invokeLocal(port string, payload []byte) ([]byte, error) {
+	client, err := rpc.Dial("tcp", fmt.Sprintf("localhost:%s", port))
 	if err != nil {
-		return events.APIGatewayProxyResponse{}, err
+		return nil, err
 	}
 	defer client.Close()
 
-	payload, err := json.Marshal(&e)
+	req := &messages.InvokeRequest{Payload: payload}
+	res := new(messages.InvokeResponse)
+
+	err = client.Call("Function.Invoke", &req, &res)
 	if err != nil {
-		return events.APIGatewayProxyResponse{}, err
+		return nil, err
 	}
 
-	invReq := messages.InvokeRequest{Payload: payload}
-	invRes := messages.InvokeResponse{}
-
-	err = client.Call("Function.Invoke", &invReq, &invRes)
-	if err != nil {
-		return events.APIGatewayProxyResponse{}, err
+	if res.Error != nil {
+		return nil, errors.New(res.Error.Message)
 	}
 
-	if invRes.Error != nil {
-		return events.APIGatewayProxyResponse{}, errors.New(invRes.Error.Message)
-	}
-
-	res := events.APIGatewayProxyResponse{}
-
-	err = json.Unmarshal(invRes.Payload, &res)
-	return res, err
+	return res.Payload, nil
 }
+
+const (
+	apiGatewayProxyEventPayload = `{
+	"resource": "/{proxy+}",
+	"path": "/resource/",
+	"httpMethod": "GET",
+	"headers": {
+		"X-Custom-Header1": "v1",
+		"X-Custom-Header2": "v3"
+	},
+	"multiValueHeaders": {
+		"X-Custom-Header1": [
+			"v1"
+		],
+		"X-Custom-Header2": [
+			"v2",
+			"v3"
+		]
+	},
+	"queryStringParameters": {
+		"q1": "v1",
+		"q2": "v3"
+	},
+	"multiValueQueryStringParameters": {
+		"q1": [
+			"v1"
+		],
+		"q2": [
+			"v2",
+			"v3"
+		]
+	},
+	"pathParameters": {
+		"proxy": "resource"
+	},
+	"stageVariables": null,
+	"requestContext": {
+		"resourcePath": "/{proxy+}",
+		"httpMethod": "GET",
+		"path": "/dev/resource/",
+		"protocol": "HTTP/1.1",
+		"apiId": "apiid"
+	},
+	"body": "body",
+	"isBase64Encoded": false
+}`
+
+	albTargetGroupSingleValueEventPayload = `{
+	"requestContext": {
+		"elb": {
+			"targetGroupArn": "arn"
+		}
+	},
+	"httpMethod": "GET",
+	"path": "/resource/",
+	"queryStringParameters": {
+		"q1": "v1",
+		"q2": "v2"
+	},
+	"headers": {
+		"x-custom-header1": "v1",
+		"x-custom-header2": "v2"
+	},
+	"body": "body",
+	"isBase64Encoded": false
+}`
+
+	albTargetGroupMultiValueEventPayload = `{
+	"requestContext": {
+		"elb": {
+			"targetGroupArn": "arn"
+		}
+	},
+	"httpMethod": "GET",
+	"path": "/resource/",
+	"multiValueQueryStringParameters": {
+		"q1": [
+			"v1"
+		],
+		"q2": [
+			"v2",
+			"v3"
+		]
+	},
+	"multiValueHeaders": {
+		"x-custom-header1": [
+			"v1"
+		],
+		"x-custom-header2": [
+			"v2",
+			"v3"
+		]
+	},
+	"body": "body",
+	"isBase64Encoded": false
+}`
+)
