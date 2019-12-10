@@ -7,7 +7,7 @@ Chop provides a wrapper to use Go HTTP handlers to handle AWS Lambda events.
 
 ## Getting started
 ```
-go get github.com/stevecallear/chop
+go get github.com/stevecallear/chop/v2
 ```
 ```
 import (
