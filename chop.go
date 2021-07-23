@@ -69,7 +69,7 @@ var (
 				StatusCode:        w.StatusCode(),
 				Headers:           reduceHeaders(w.Header()),
 				MultiValueHeaders: w.Header(),
-				Body:              w.buffer.String(),
+				Body:              w.Body(),
 			})
 		},
 	}
@@ -103,7 +103,7 @@ var (
 				StatusDescription: w.Status(),
 				Headers:           reduceHeaders(w.Header()),
 				MultiValueHeaders: w.Header(),
-				Body:              w.buffer.String(),
+				Body:              w.Body(),
 			})
 		},
 	}
