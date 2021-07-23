@@ -224,7 +224,7 @@ func getEventProcessor(payload []byte) (*eventProcessor, error) {
 }
 
 func addMapValues(values map[string]string, multiValues map[string][]string, addFn func(string, string)) {
-	if multiValues != nil && len(multiValues) > 1 {
+	if len(multiValues) > 1 {
 		for k, mv := range multiValues {
 			for _, v := range mv {
 				addFn(k, v)
@@ -234,10 +234,8 @@ func addMapValues(values map[string]string, multiValues map[string][]string, add
 		return
 	}
 
-	if values != nil {
-		for k, v := range values {
-			addFn(k, v)
-		}
+	for k, v := range values {
+		addFn(k, v)
 	}
 }
 
