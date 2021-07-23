@@ -28,7 +28,7 @@ type (
 	}
 
 	eventProcessor struct {
-		canProcess       func(map[string]gjson.Result) bool
+		canProcess       func([]byte) bool
 		unmarshalRequest func(context.Context, []byte) (*http.Request, error)
 		marshalResponse  func(*ResponseWriter) ([]byte, error)
 	}
@@ -41,9 +41,9 @@ var (
 	ErrUnsupportedEventType = errors.New("unsupported lambda event type")
 
 	apiGatewayProxyEventProcessor = &eventProcessor{
-		canProcess: func(requestContext map[string]gjson.Result) bool {
-			_, ok := requestContext["apiId"]
-			return ok
+		canProcess: func(payload []byte) bool {
+			pv := gjson.GetManyBytes(payload, "version", "requestContext.apiId")
+			return !pv[0].Exists() && pv[1].Exists()
 		},
 		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
 			e := new(events.APIGatewayProxyRequest)
@@ -75,9 +75,8 @@ var (
 	}
 
 	albTargetGroupEventProcessor = &eventProcessor{
-		canProcess: func(requestContext map[string]gjson.Result) bool {
-			_, ok := requestContext["elb"]
-			return ok
+		canProcess: func(payload []byte) bool {
+			return gjson.GetBytes(payload, "requestContext.elb").Exists()
 		},
 		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
 			e := new(events.ALBTargetGroupRequest)
@@ -212,10 +211,11 @@ func GetEvent(r *http.Request) interface{} {
 }
 
 func getEventProcessor(payload []byte) (*eventProcessor, error) {
-	ctx := gjson.GetBytes(payload, "requestContext").Map()
-
-	for _, p := range []*eventProcessor{apiGatewayProxyEventProcessor, albTargetGroupEventProcessor} {
-		if p.canProcess(ctx) {
+	for _, p := range []*eventProcessor{
+		apiGatewayProxyEventProcessor,
+		albTargetGroupEventProcessor,
+	} {
+		if p.canProcess(payload) {
 			return p, nil
 		}
 	}
