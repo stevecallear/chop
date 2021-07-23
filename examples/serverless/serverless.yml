@@ -8,10 +8,9 @@ provider:
   versionFunctions: false
 
 package:
-  exclude:
-    - ./**
-  include:
-    - ./bin/**
+  patterns:
+    - '!./**'
+    - './bin/**'
 
 functions:
   api:
@@ -25,6 +24,9 @@ functions:
       - http:
           path: /resource
           method: ANY
+      - httpApi:
+          path: /resource
+          method: '*'
 
 custom:
   objectPrefix: "${self:service}-${self:provider.stage}"

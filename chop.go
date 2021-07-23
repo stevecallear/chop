@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -28,7 +29,7 @@ type (
 	}
 
 	eventProcessor struct {
-		canProcess       func(map[string]gjson.Result) bool
+		canProcess       func([]byte) bool
 		unmarshalRequest func(context.Context, []byte) (*http.Request, error)
 		marshalResponse  func(*ResponseWriter) ([]byte, error)
 	}
@@ -41,9 +42,9 @@ var (
 	ErrUnsupportedEventType = errors.New("unsupported lambda event type")
 
 	apiGatewayProxyEventProcessor = &eventProcessor{
-		canProcess: func(requestContext map[string]gjson.Result) bool {
-			_, ok := requestContext["apiId"]
-			return ok
+		canProcess: func(payload []byte) bool {
+			pv := gjson.GetManyBytes(payload, "version", "requestContext.apiId")
+			return !pv[0].Exists() && pv[1].Exists()
 		},
 		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
 			e := new(events.APIGatewayProxyRequest)
@@ -69,15 +70,53 @@ var (
 				StatusCode:        w.StatusCode(),
 				Headers:           reduceHeaders(w.Header()),
 				MultiValueHeaders: w.Header(),
-				Body:              w.buffer.String(),
+				Body:              w.Body(),
+			})
+		},
+	}
+
+	apiGatewayV2HTTPEventProcessor = &eventProcessor{
+		canProcess: func(payload []byte) bool {
+			pv := gjson.GetManyBytes(payload, "version", "requestContext.apiId")
+			return pv[0].String() == "2.0" && pv[1].Exists()
+		},
+		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
+			e := new(events.APIGatewayV2HTTPRequest)
+			if err := json.Unmarshal(payload, e); err != nil {
+				return nil, err
+			}
+
+			r, err := http.NewRequest(e.RequestContext.HTTP.Method, e.RawPath, bytes.NewBufferString(e.Body))
+			if err != nil {
+				return nil, err
+			}
+
+			q := r.URL.Query()
+			for k, p := range e.QueryStringParameters {
+				for _, v := range strings.Split(p, ",") {
+					q.Add(k, v)
+				}
+			}
+			r.URL.RawQuery = q.Encode()
+
+			addMapValues(e.Headers, nil, r.Header.Add)
+
+			return WithEvent(r.WithContext(ctx), e), nil
+		},
+		marshalResponse: func(w *ResponseWriter) ([]byte, error) {
+			return json.Marshal(&events.APIGatewayV2HTTPResponse{
+				StatusCode:        w.StatusCode(),
+				Headers:           reduceHeaders(w.Header()),
+				MultiValueHeaders: w.Header(),
+				Body:              w.Body(),
+				Cookies:           []string{},
 			})
 		},
 	}
 
 	albTargetGroupEventProcessor = &eventProcessor{
-		canProcess: func(requestContext map[string]gjson.Result) bool {
-			_, ok := requestContext["elb"]
-			return ok
+		canProcess: func(payload []byte) bool {
+			return gjson.GetBytes(payload, "requestContext.elb").Exists()
 		},
 		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
 			e := new(events.ALBTargetGroupRequest)
@@ -104,7 +143,7 @@ var (
 				StatusDescription: w.Status(),
 				Headers:           reduceHeaders(w.Header()),
 				MultiValueHeaders: w.Header(),
-				Body:              w.buffer.String(),
+				Body:              w.Body(),
 			})
 		},
 	}
@@ -212,10 +251,12 @@ func GetEvent(r *http.Request) interface{} {
 }
 
 func getEventProcessor(payload []byte) (*eventProcessor, error) {
-	ctx := gjson.GetBytes(payload, "requestContext").Map()
-
-	for _, p := range []*eventProcessor{apiGatewayProxyEventProcessor, albTargetGroupEventProcessor} {
-		if p.canProcess(ctx) {
+	for _, p := range []*eventProcessor{
+		apiGatewayProxyEventProcessor,
+		apiGatewayV2HTTPEventProcessor,
+		albTargetGroupEventProcessor,
+	} {
+		if p.canProcess(payload) {
 			return p, nil
 		}
 	}
@@ -224,7 +265,7 @@ func getEventProcessor(payload []byte) (*eventProcessor, error) {
 }
 
 func addMapValues(values map[string]string, multiValues map[string][]string, addFn func(string, string)) {
-	if multiValues != nil && len(multiValues) > 1 {
+	if len(multiValues) > 1 {
 		for k, mv := range multiValues {
 			for _, v := range mv {
 				addFn(k, v)
@@ -234,10 +275,8 @@ func addMapValues(values map[string]string, multiValues map[string][]string, add
 		return
 	}
 
-	if values != nil {
-		for k, v := range values {
-			addFn(k, v)
-		}
+	for k, v := range values {
+		addFn(k, v)
 	}
 }
 
