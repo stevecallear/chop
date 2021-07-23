@@ -1,5 +1,5 @@
 # Chop
-[![Build Status](https://travis-ci.org/stevecallear/chop.svg?branch=master)](https://travis-ci.org/stevecallear/chop)
+[![Build Status](https://github.com/stevecallear/chop/actions/workflows/build.yml/badge.svg)](#)
 [![codecov](https://codecov.io/gh/stevecallear/chop/branch/master/graph/badge.svg)](https://codecov.io/gh/stevecallear/chop)
 [![Go Report Card](https://goreportcard.com/badge/github.com/stevecallear/chop)](https://goreportcard.com/report/github.com/stevecallear/chop)
 
