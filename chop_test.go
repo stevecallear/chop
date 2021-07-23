@@ -93,18 +93,14 @@ func TestStart(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, err := invokeLocal("8081", []byte(tt.payload))
+			assertErrorExists(t, err, false)
 			if err != nil {
-				t.Errorf("got %v, expected nil", err)
-				t.FailNow()
+				return
 			}
 
-			if err = json.Unmarshal(b, tt.act); err != nil {
-				t.Errorf("got %v, expected nil", err)
-			}
-
-			if !reflect.DeepEqual(tt.act, tt.exp) {
-				t.Errorf("got %v, expected %v", tt.act, tt.exp)
-			}
+			err = json.Unmarshal(b, tt.act)
+			assertErrorExists(t, err, false)
+			assertDeepEqual(t, tt.act, tt.exp)
 		})
 	}
 }
@@ -158,10 +154,7 @@ func TestHandler_Invoke(t *testing.T) {
 					}
 
 					act := toRequest(r)
-
-					if !reflect.DeepEqual(act, exp) {
-						t.Errorf("got %v, expected %v", act, exp)
-					}
+					assertDeepEqual(t, act, exp)
 
 					w.Header().Add("X-Custom-Header", "v1")
 					w.Header().Add("X-Custom-Header", "v2")
@@ -214,10 +207,7 @@ func TestHandler_Invoke(t *testing.T) {
 					}
 
 					act := toRequest(r)
-
-					if !reflect.DeepEqual(act, exp) {
-						t.Errorf("got %v, expected %v", act, exp)
-					}
+					assertDeepEqual(t, act, exp)
 
 					w.Header().Add("X-Custom-Header", "v1")
 					w.Header().Add("X-Custom-Header", "v2")
@@ -271,10 +261,7 @@ func TestHandler_Invoke(t *testing.T) {
 					}
 
 					act := toRequest(r)
-
-					if !reflect.DeepEqual(act, exp) {
-						t.Errorf("got %v, expected %v", act, exp)
-					}
+					assertDeepEqual(t, act, exp)
 
 					w.Header().Add("X-Custom-Header", "v1")
 					w.Header().Add("X-Custom-Header", "v2")
@@ -312,10 +299,7 @@ func TestHandler_Invoke(t *testing.T) {
 					}
 
 					act := toRequest(r)
-
-					if !reflect.DeepEqual(act, exp) {
-						t.Errorf("got %v, expected %v", act, exp)
-					}
+					assertDeepEqual(t, act, exp)
 
 					w.Header().Add("X-Custom-Header", "v1")
 					w.Header().Add("X-Custom-Header", "v2")
@@ -342,24 +326,16 @@ func TestHandler_Invoke(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := tt.handlerFn(t)
-			b, err := chop.Wrap(h).Invoke(context.Background(), []byte(tt.payload))
 
-			if err != nil && !tt.err {
-				t.Errorf("got %v, expected nil", err)
-			} else if err == nil && tt.err {
-				t.Error("got nil, expected an error")
-			}
+			b, err := chop.Wrap(h).Invoke(context.Background(), []byte(tt.payload))
+			assertErrorExists(t, err, tt.err)
 			if err != nil {
 				return
 			}
 
-			if err = json.Unmarshal(b, tt.act); err != nil {
-				t.Errorf("got %v, expected nil", err)
-			}
-
-			if !reflect.DeepEqual(tt.act, tt.exp) {
-				t.Errorf("got %v, expected %v", tt.act, tt.exp)
-			}
+			err = json.Unmarshal(b, tt.act)
+			assertErrorExists(t, err, false)
+			assertDeepEqual(t, tt.act, tt.exp)
 		})
 	}
 }
@@ -484,10 +460,7 @@ func TestResponseWriter_Write(t *testing.T) {
 			}
 
 			act := toResponse(w)
-
-			if !reflect.DeepEqual(act, tt.exp) {
-				t.Errorf("got %v, expected %v", act, tt.exp)
-			}
+			assertDeepEqual(t, act, tt.exp)
 		})
 	}
 }
@@ -526,10 +499,7 @@ func TestResponseWriter_WriteHeader(t *testing.T) {
 			}
 
 			act := toResponse(w)
-
-			if !reflect.DeepEqual(act, tt.exp) {
-				t.Errorf("got %v, expected %v", act, tt.exp)
-			}
+			assertDeepEqual(t, act, tt.exp)
 		})
 	}
 }
@@ -581,6 +551,21 @@ func toResponse(w *chop.ResponseWriter) response {
 
 func toStatusDescription(code int) string {
 	return fmt.Sprintf("%d %s", code, http.StatusText(code))
+}
+
+func assertErrorExists(t *testing.T, act error, exp bool) {
+	if act != nil && !exp {
+		t.Errorf("got %v, expected nil", act)
+	}
+	if act == nil && exp {
+		t.Error("got nil, expected an error")
+	}
+}
+
+func assertDeepEqual(t *testing.T, act, exp interface{}) {
+	if !reflect.DeepEqual(act, exp) {
+		t.Errorf("got %v, expected %v", act, exp)
+	}
 }
 
 func invokeLocal(port string, payload []byte) ([]byte, error) {
