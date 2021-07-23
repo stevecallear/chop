@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -70,6 +71,45 @@ var (
 				Headers:           reduceHeaders(w.Header()),
 				MultiValueHeaders: w.Header(),
 				Body:              w.Body(),
+			})
+		},
+	}
+
+	apiGatewayV2HTTPEventProcessor = &eventProcessor{
+		canProcess: func(payload []byte) bool {
+			pv := gjson.GetManyBytes(payload, "version", "requestContext.apiId")
+			return pv[0].String() == "2.0" && pv[1].Exists()
+		},
+		unmarshalRequest: func(ctx context.Context, payload []byte) (*http.Request, error) {
+			e := new(events.APIGatewayV2HTTPRequest)
+			if err := json.Unmarshal(payload, e); err != nil {
+				return nil, err
+			}
+
+			r, err := http.NewRequest(e.RequestContext.HTTP.Method, e.RawPath, bytes.NewBufferString(e.Body))
+			if err != nil {
+				return nil, err
+			}
+
+			q := r.URL.Query()
+			for k, p := range e.QueryStringParameters {
+				for _, v := range strings.Split(p, ",") {
+					q.Add(k, v)
+				}
+			}
+			r.URL.RawQuery = q.Encode()
+
+			addMapValues(e.Headers, nil, r.Header.Add)
+
+			return WithEvent(r.WithContext(ctx), e), nil
+		},
+		marshalResponse: func(w *ResponseWriter) ([]byte, error) {
+			return json.Marshal(&events.APIGatewayV2HTTPResponse{
+				StatusCode:        w.StatusCode(),
+				Headers:           reduceHeaders(w.Header()),
+				MultiValueHeaders: w.Header(),
+				Body:              w.Body(),
+				Cookies:           []string{},
 			})
 		},
 	}
@@ -213,6 +253,7 @@ func GetEvent(r *http.Request) interface{} {
 func getEventProcessor(payload []byte) (*eventProcessor, error) {
 	for _, p := range []*eventProcessor{
 		apiGatewayProxyEventProcessor,
+		apiGatewayV2HTTPEventProcessor,
 		albTargetGroupEventProcessor,
 	} {
 		if p.canProcess(payload) {

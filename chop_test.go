@@ -50,6 +50,22 @@ func TestStart(t *testing.T) {
 			},
 		},
 		{
+			name:    "should handle api gateway http v2 events",
+			payload: apiGatewayV2HTTPEventPayload,
+			act:     new(events.APIGatewayV2HTTPResponse),
+			exp: &events.APIGatewayV2HTTPResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]string{
+					"Content-Type": "text/plain; charset=utf-8",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type": {"text/plain; charset=utf-8"},
+				},
+				Body:    "*lambdacontext.LambdaContext|*events.APIGatewayV2HTTPRequest",
+				Cookies: []string{},
+			},
+		},
+		{
 			name:    "should handle alb target group events",
 			payload: albTargetGroupSingleValueEventPayload,
 			act:     new(events.ALBTargetGroupResponse),
@@ -75,7 +91,7 @@ func TestStart(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // allow the handler to start
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(*testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			b, err := invokeLocal("8081", []byte(tt.payload))
 			if err != nil {
 				t.Errorf("got %v, expected nil", err)
@@ -164,6 +180,63 @@ func TestHandler_Invoke(t *testing.T) {
 					"X-Custom-Header": {"v1", "v2"},
 				},
 				Body: "body",
+			},
+		},
+		{
+			name:    "should return an error if the api gateway http v2 event cannot be unmarshalled",
+			payload: `{"version":"2.0","requestContext":{"apiId":"id"},"resource":"a}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should return an error if the api gateway http v2 event path is invalid",
+			payload: `{"version":"2.0","httpMethod":"GET","rawPath":"/resource###%","requestContext":{"apiId":"id"}}`,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+			err: true,
+		},
+		{
+			name:    "should handle api gateway http v2 events",
+			payload: apiGatewayV2HTTPEventPayload,
+			handlerFn: func(t *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					exp := request{
+						method: "GET",
+						url:    "/resource/?q1=v1&q2=v2&q2=v3",
+						body:   "body",
+						header: http.Header{
+							"X-Custom-Header1": {"v1"},
+							"X-Custom-Header2": {"v2"},
+						},
+					}
+
+					act := toRequest(r)
+
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("got %v, expected %v", act, exp)
+					}
+
+					w.Header().Add("X-Custom-Header", "v1")
+					w.Header().Add("X-Custom-Header", "v2")
+					w.Write([]byte("body"))
+				}
+			},
+			act: &events.APIGatewayV2HTTPResponse{},
+			exp: &events.APIGatewayV2HTTPResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]string{
+					"Content-Type":    "text/plain; charset=utf-8",
+					"X-Custom-Header": "v1",
+				},
+				MultiValueHeaders: map[string][]string{
+					"Content-Type":    {"text/plain; charset=utf-8"},
+					"X-Custom-Header": {"v1", "v2"},
+				},
+				Body:    "body",
+				Cookies: []string{},
 			},
 		},
 		{
@@ -573,6 +646,31 @@ const (
 		"path": "/dev/resource/",
 		"protocol": "HTTP/1.1",
 		"apiId": "apiid"
+	},
+	"body": "body",
+	"isBase64Encoded": false
+}`
+
+	apiGatewayV2HTTPEventPayload = ` {
+	"version": "2.0",
+	"routeKey": "$default",
+	"rawPath": "/resource/",
+	"rawQueryString": "q1=v1&q2=v2&q2=v3",
+	"headers": {
+		"x-custom-header1": "v1",
+		"x-custom-header2": "v2"
+	},
+	"queryStringParameters": {
+		"q1": "v1",
+		"q2": "v2,v3"
+	},
+	"requestContext": {
+		"apiId": "apiid",
+		"http": {
+			"method": "GET",
+			"path": "/resource",
+			"protocol": "HTTP/1.1"
+		}
 	},
 	"body": "body",
 	"isBase64Encoded": false
